@@ -15,6 +15,14 @@
 const express = require("express");
 const app = express();
 app.use(express.json());
+// Support URL-encoded bodies (required for SAML HTTP-POST binding callbacks)
+app.use(express.urlencoded({ extended: false }));
+
+// ---------------------------------------------------------------------------
+// SAML SSO routes  –  /api/auth/saml/{login,callback,metadata}
+// ---------------------------------------------------------------------------
+const samlRouter = require("./routes/saml");
+app.use("/api/auth/saml", samlRouter);
 
 // ---------------------------------------------------------------------------
 // Verbatim vulnerable logic from @openclaw/nextcloud-talk@2026.2.2 policy.ts
@@ -125,6 +133,9 @@ app.post("/vuln", (req, res) => {
 
 app.listen(9090, "0.0.0.0", () => {
   console.log("Carrier app listening on 0.0.0.0:9090");
-  console.log("  GET  /health  — liveness check");
-  console.log("  POST /vuln    — Nextcloud Talk allowlist bypass demo");
+  console.log("  GET  /health                    — liveness check");
+  console.log("  POST /vuln                      — Nextcloud Talk allowlist bypass demo");
+  console.log("  GET  /api/auth/saml/login       — SAML SSO: initiate login (stub)");
+  console.log("  POST /api/auth/saml/callback    — SAML SSO: ACS / process IdP response (stub)");
+  console.log("  GET  /api/auth/saml/metadata    — SAML SSO: SP metadata XML (stub)");
 });
