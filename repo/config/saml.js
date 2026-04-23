@@ -59,7 +59,10 @@ const idp = {
    * Base-64-encoded X.509 certificate provided by the IdP.
    * Used to verify the digital signature on SAML responses / assertions.
    * Strip PEM headers before storing in the environment variable.
-   * No default — must be explicitly set in production via SAML_IDP_CERTIFICATE.
+   *
+   * When unset, the /callback endpoint will reject all SAMLResponses with
+   * 401 ("certificate not configured") — which is the correct secure default.
+   * Set SAML_IDP_CERTIFICATE in production to enable signature verification.
    */
   certificate: process.env.SAML_IDP_CERTIFICATE || "",
 };

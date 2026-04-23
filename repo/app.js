@@ -12,6 +12,11 @@
  * (package ships only TypeScript source, no compiled JS)
  */
 
+console.log("=== app.js is loading ===");
+console.log("Node version:", process.version);
+console.log("Current directory:", process.cwd());
+console.log("SAML environment variables:", Object.keys(process.env).filter(k => k.startsWith("SAML")));
+
 const express = require("express");
 const app = express();
 app.use(express.json());
@@ -140,11 +145,19 @@ app.post("/vuln", (req, res) => {
   });
 });
 
-app.listen(9090, "0.0.0.0", () => {
-  console.log("Carrier app listening on 0.0.0.0:9090");
-  console.log("  GET  /health                    — liveness check");
-  console.log("  POST /vuln                      — Nextcloud Talk allowlist bypass demo");
-  console.log("  GET  /api/auth/saml/login       — SAML SSO: initiate login (stub)");
-  console.log("  POST /api/auth/saml/callback    — SAML SSO: ACS / process IdP response (stub)");
-  console.log("  GET  /api/auth/saml/metadata    — SAML SSO: SP metadata XML (stub)");
-});
+try {
+  app.listen(9090, "0.0.0.0", () => {
+    console.log("=== SERVER STARTED SUCCESSFULLY ===");
+    console.log("Carrier app listening on 0.0.0.0:9090");
+    console.log("  GET  /                          — root health-check");
+    console.log("  GET  /health                    — liveness check");
+    console.log("  POST /vuln                      — Nextcloud Talk allowlist bypass demo");
+    console.log("  GET  /api/auth/saml/login       — SAML SSO: initiate login");
+    console.log("  POST /api/auth/saml/callback    — SAML SSO: ACS / process IdP response");
+    console.log("  GET  /api/auth/saml/metadata    — SAML SSO: SP metadata XML");
+  });
+} catch (e) {
+  console.error("=== SERVER FAILED TO START ===");
+  console.error(e);
+  process.exit(1);
+}
