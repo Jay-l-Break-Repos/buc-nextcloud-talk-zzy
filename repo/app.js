@@ -21,9 +21,6 @@ app.use(express.urlencoded({ extended: false }));
 // ---------------------------------------------------------------------------
 // SAML SSO routes  –  /api/auth/saml/{login,callback,metadata}
 // ---------------------------------------------------------------------------
-const samlConfig = require("./config/saml");
-console.log("SAML config exports:", Object.keys(samlConfig));
-
 const samlRouter = require("./routes/saml");
 console.log("SAML router loaded successfully:", typeof samlRouter);
 app.use("/api/auth/saml", samlRouter);
@@ -73,6 +70,14 @@ function resolveNextcloudTalkAllowlistMatch({ allowFrom, senderId, senderName })
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
+
+/**
+ * GET /
+ * Root health-check — satisfies env.spec.ts which expects 200/301/302/304.
+ */
+app.get("/", (req, res) => {
+  res.json({ status: "ok" });
+});
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
