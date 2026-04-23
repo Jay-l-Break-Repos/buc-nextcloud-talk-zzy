@@ -95,14 +95,29 @@ const security = {
 };
 
 /**
- * Validate that all required IdP fields are present.
+ * Validate the minimum IdP fields needed to initiate a login redirect.
+ * The IdP certificate is NOT required at login time — it is only used when
+ * verifying the assertion that comes back on the /callback endpoint.
+ *
+ * Returns an array of missing field names (empty array = valid).
+ * @returns {string[]}
+ */
+function validateLoginConfig() {
+  const missing = [];
+  if (!idp.entityId) missing.push("SAML_IDP_ENTITY_ID");
+  if (!idp.ssoUrl)   missing.push("SAML_IDP_SSO_URL");
+  return missing;
+}
+
+/**
+ * Validate that ALL required IdP fields are present, including the certificate
+ * needed to verify assertion signatures at the /callback endpoint.
+ *
  * Returns an array of missing field names (empty array = valid).
  * @returns {string[]}
  */
 function validateIdpConfig() {
-  const missing = [];
-  if (!idp.entityId)   missing.push("SAML_IDP_ENTITY_ID");
-  if (!idp.ssoUrl)     missing.push("SAML_IDP_SSO_URL");
+  const missing = validateLoginConfig();
   if (!idp.certificate) missing.push("SAML_IDP_CERTIFICATE");
   return missing;
 }
@@ -111,5 +126,6 @@ module.exports = {
   idp,
   sp,
   security,
+  validateLoginConfig,
   validateIdpConfig,
 };
