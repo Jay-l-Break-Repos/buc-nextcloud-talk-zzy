@@ -51,7 +51,10 @@ router.get("/login", (req, res) => {
 
   // TODO (next task): build a signed AuthnRequest, deflate + Base64-encode it,
   // and append it as the SAMLRequest query parameter before redirecting.
-  return res.redirect(302, samlConfig.idp.ssoUrl);
+  //
+  // Use res.status(302).redirect() rather than res.redirect(302, url) because
+  // the two-argument overload was removed in Express 5.
+  return res.status(302).redirect(samlConfig.idp.ssoUrl);
 });
 
 // ---------------------------------------------------------------------------
