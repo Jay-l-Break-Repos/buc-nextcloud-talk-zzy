@@ -40,19 +40,26 @@ function parseBool(value, defaultValue) {
  * These values come from the IdP's metadata XML or admin console.
  */
 const idp = {
-  /** Unique URI that identifies the Identity Provider. */
-  entityId: process.env.SAML_IDP_ENTITY_ID || "",
+  /**
+   * Unique URI that identifies the Identity Provider.
+   * Default is a placeholder suitable for local development and testing.
+   * Override with SAML_IDP_ENTITY_ID in production.
+   */
+  entityId: process.env.SAML_IDP_ENTITY_ID || "urn:idp:example",
 
   /**
    * IdP's Single Sign-On service URL.
    * The SP will redirect the user here to initiate authentication.
+   * Default points to a local mock IdP for development/testing.
+   * Override with SAML_IDP_SSO_URL in production.
    */
-  ssoUrl: process.env.SAML_IDP_SSO_URL || "",
+  ssoUrl: process.env.SAML_IDP_SSO_URL || "http://localhost:8080/sso",
 
   /**
    * Base-64-encoded X.509 certificate provided by the IdP.
    * Used to verify the digital signature on SAML responses / assertions.
    * Strip PEM headers before storing in the environment variable.
+   * No default — must be explicitly set in production via SAML_IDP_CERTIFICATE.
    */
   certificate: process.env.SAML_IDP_CERTIFICATE || "",
 };
