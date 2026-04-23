@@ -1,85 +1,29 @@
-/**
- * Carrier app for GHSA-r5h9-vjqc-hq3r
- * @openclaw/nextcloud-talk <= 2026.2.2
- *
- * Vulnerability: resolveNextcloudTalkAllowlistMatch() checks actor.name
- * (user-controlled display name) against the allowlist in addition to actor.id.
- * An attacker can set their Nextcloud display name to match an allowlisted user ID
- * and bypass DM/group allowlist access controls.
- *
- * The vulnerable logic is extracted verbatim from:
- *   node_modules/@openclaw/nextcloud-talk/src/policy.ts
- * (package ships only TypeScript source, no compiled JS)
- */
+"use strict";
 
-console.log("=== app.js is loading ===");
-console.log("Node version:", process.version);
-console.log("Current directory:", process.cwd());
-console.log("SAML environment variables:", Object.keys(process.env).filter(k => k.startsWith("SAML")));
+// ---------------------------------------------------------------------------
+// Carrier app for GHSA-r5h9-vjqc-hq3r
+// @openclaw/nextcloud-talk <= 2026.2.2
+// ---------------------------------------------------------------------------
+
+console.log("=== app.js loading ===");
+console.log("Node:", process.version, "| cwd:", process.cwd());
 
 const express = require("express");
 const app = express();
+
 app.use(express.json());
-// Support URL-encoded bodies (required for SAML HTTP-POST binding callbacks)
 app.use(express.urlencoded({ extended: false }));
 
 // ---------------------------------------------------------------------------
-// SAML SSO routes  –  /api/auth/saml/{login,callback,metadata}
+// SAML SSO routes
 // ---------------------------------------------------------------------------
 const samlRouter = require("./routes/saml");
-console.log("SAML router loaded successfully:", typeof samlRouter);
 app.use("/api/auth/saml", samlRouter);
+console.log("SAML router mounted.");
 
 // ---------------------------------------------------------------------------
-// Verbatim vulnerable logic from @openclaw/nextcloud-talk@2026.2.2 policy.ts
+// Health / root
 // ---------------------------------------------------------------------------
-
-function normalizeAllowEntry(raw) {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/^(nextcloud-talk|nc-talk|nc):/i, "");
-}
-
-function normalizeNextcloudTalkAllowlist(values) {
-  return (values ?? []).map((value) => normalizeAllowEntry(String(value))).filter(Boolean);
-}
-
-/**
- * VULNERABLE: accepts senderName (actor.name / display name) as a match source.
- * An attacker who sets their display name to an allowlisted user ID will pass
- * this check with matchSource === "name".
- *
- * Fixed in >= 2026.2.6 by removing the senderName parameter entirely.
- */
-function resolveNextcloudTalkAllowlistMatch({ allowFrom, senderId, senderName }) {
-  const normalized = normalizeNextcloudTalkAllowlist(allowFrom);
-  if (normalized.length === 0) {
-    return { allowed: false };
-  }
-  if (normalized.includes("*")) {
-    return { allowed: true, matchKey: "*", matchSource: "wildcard" };
-  }
-  const normId = normalizeAllowEntry(senderId);
-  if (normalized.includes(normId)) {
-    return { allowed: true, matchKey: normId, matchSource: "id" };
-  }
-  // VULNERABLE: senderName (actor.name) is attacker-controlled display name
-  const normName = senderName ? normalizeAllowEntry(senderName) : "";
-  if (normName && normalized.includes(normName)) {
-    return { allowed: true, matchKey: normName, matchSource: "name" };
-  }
-  return { allowed: false };
-}
-
-// ---------------------------------------------------------------------------
-// Endpoints
-// ---------------------------------------------------------------------------
-
-/**
- * GET /
- * Root health-check — satisfies env.spec.ts which expects 200/301/302/304.
- */
 app.get("/", (req, res) => {
   res.json({ status: "ok" });
 });
@@ -88,76 +32,63 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// ---------------------------------------------------------------------------
+// Nextcloud Talk allowlist-bypass demo (GHSA-r5h9-vjqc-hq3r)
+// ---------------------------------------------------------------------------
+
+function normalizeAllowEntry(raw) {
+  return raw.trim().toLowerCase().replace(/^(nextcloud-talk|nc-talk|nc):/i, "");
+}
+
+function normalizeNextcloudTalkAllowlist(values) {
+  return (values ?? []).map((v) => normalizeAllowEntry(String(v))).filter(Boolean);
+}
+
 /**
- * POST /vuln
- *
- * Simulates the Nextcloud Talk webhook allowlist check as performed by the
- * vulnerable @openclaw/nextcloud-talk plugin.
- *
- * Expected JSON body (mirrors a Nextcloud Talk webhook payload + bot config):
- * {
- *   "actor": {
- *     "id":   "<real Nextcloud user ID>",
- *     "name": "<attacker-controlled display name>"
- *   },
- *   "allowFrom": ["<allowlisted-user-id>", ...]   // bot's configured allowlist
- * }
- *
- * Exploit: set actor.name == an entry in allowFrom while actor.id differs.
- * The vulnerable check will return { allowed: true, matchSource: "name" }.
+ * VULNERABLE: accepts senderName (actor.name / display name) as a match source.
+ * Fixed in >= 2026.2.6 by removing the senderName parameter entirely.
  */
+function resolveNextcloudTalkAllowlistMatch({ allowFrom, senderId, senderName }) {
+  const normalized = normalizeNextcloudTalkAllowlist(allowFrom);
+  if (normalized.length === 0) return { allowed: false };
+  if (normalized.includes("*")) return { allowed: true, matchKey: "*", matchSource: "wildcard" };
+  const normId = normalizeAllowEntry(senderId);
+  if (normalized.includes(normId)) return { allowed: true, matchKey: normId, matchSource: "id" };
+  const normName = senderName ? normalizeAllowEntry(senderName) : "";
+  if (normName && normalized.includes(normName)) return { allowed: true, matchKey: normName, matchSource: "name" };
+  return { allowed: false };
+}
+
 app.post("/vuln", (req, res) => {
-  const body = req.body || {};
+  const body       = req.body || {};
+  const actor      = body.actor || {};
+  const senderId   = actor.id   || "";
+  const senderName = actor.name || "";
+  const allowFrom  = body.allowFrom || [];
 
-  const actor     = body.actor     || {};
-  const senderId  = actor.id   || "";          // actor.id   — stable, from Nextcloud
-  const senderName = actor.name || "";         // actor.name — mutable display name (attacker-controlled)
-  const allowFrom = body.allowFrom || [];      // bot's configured allowlist
-
-  // Call the vulnerable function exactly as inbound.ts does in the affected version
-  const result = resolveNextcloudTalkAllowlistMatch({
-    allowFrom,
-    senderId,
-    senderName,
-  });
+  const result = resolveNextcloudTalkAllowlistMatch({ allowFrom, senderId, senderName });
 
   res.json({
-    // Access-control decision
     allowed:     result.allowed,
-    matchSource: result.matchSource ?? null,   // "id" | "name" | "wildcard" | null
-    matchKey:    result.matchKey   ?? null,
-
-    // Echo inputs for clarity
-    input: {
-      senderId,
-      senderName,
-      allowFrom,
-    },
-
-    // Explain what happened
+    matchSource: result.matchSource ?? null,
+    matchKey:    result.matchKey    ?? null,
+    input:       { senderId, senderName, allowFrom },
     note: result.allowed && result.matchSource === "name"
       ? "VULNERABLE: access granted via actor.name (display name) — allowlist bypass succeeded"
       : result.allowed && result.matchSource === "id"
       ? "Access granted via actor.id (legitimate)"
-      : result.allowed
-      ? "Access granted (wildcard)"
-      : "Access denied",
+      : result.allowed ? "Access granted (wildcard)" : "Access denied",
   });
 });
 
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
 try {
   app.listen(9090, "0.0.0.0", () => {
-    console.log("=== SERVER STARTED SUCCESSFULLY ===");
-    console.log("Carrier app listening on 0.0.0.0:9090");
-    console.log("  GET  /                          — root health-check");
-    console.log("  GET  /health                    — liveness check");
-    console.log("  POST /vuln                      — Nextcloud Talk allowlist bypass demo");
-    console.log("  GET  /api/auth/saml/login       — SAML SSO: initiate login");
-    console.log("  POST /api/auth/saml/callback    — SAML SSO: ACS / process IdP response");
-    console.log("  GET  /api/auth/saml/metadata    — SAML SSO: SP metadata XML");
+    console.log("=== SERVER STARTED SUCCESSFULLY on 0.0.0.0:9090 ===");
   });
 } catch (e) {
-  console.error("=== SERVER FAILED TO START ===");
-  console.error(e);
+  console.error("=== SERVER FAILED TO START ===", e);
   process.exit(1);
 }
