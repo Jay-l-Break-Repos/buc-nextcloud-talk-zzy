@@ -4,18 +4,15 @@
  * Implements the three core endpoints required for SAML 2.0 Web Browser SSO:
  *
  *   GET  /api/auth/saml/login     – Initiate SSO: redirect (302) to IdP SSO URL
- *   POST /api/auth/saml/callback  – ACS: validate SAMLResponse, reject invalid ones
+ *   POST /api/auth/saml/callback  – ACS: validate SAMLResponse XML-DSig signature
  *   GET  /api/auth/saml/metadata  – Return this SP's metadata XML
- *
- * Full SAML assertion signing/verification will be wired in a subsequent task
- * once an SP key-pair and a SAML library (e.g. samlify / passport-saml) are
- * introduced. The callback already enforces the correct HTTP error semantics so
- * that the test suite passes against the current stub.
  */
 
 "use strict";
 
 const { Router } = require("express");
+const { DOMParser } = require("@xmldom/xmldom");
+const { SignedXml } = require("xml-crypto");
 const samlConfig = require("../config/saml");
 
 const router = Router();
@@ -62,17 +59,86 @@ router.get("/login", (req, res) => {
 // ---------------------------------------------------------------------------
 
 /**
+ * Wrap a bare base-64 certificate string in PEM armour.
+ * xml-crypto's SignedXml expects a PEM-formatted public certificate.
+ *
+ * @param {string} certBase64 - raw base64 (with or without PEM headers)
+ * @returns {string} PEM string
+ */
+function toPem(certBase64) {
+  const stripped = certBase64
+    .replace(/-----BEGIN CERTIFICATE-----/g, "")
+    .replace(/-----END CERTIFICATE-----/g, "")
+    .replace(/\s+/g, "");
+  const lines = stripped.match(/.{1,64}/g) || [];
+  return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----`;
+}
+
+/**
+ * Verify every XML-DSig <Signature> element inside a decoded SAML Response.
+ *
+ * @param {string} xml   - decoded SAML Response XML string
+ * @param {string} cert  - IdP certificate (PEM or bare base64)
+ * @returns {{ valid: boolean, reason?: string }}
+ */
+function verifySamlSignature(xml, cert) {
+  // Parse the XML document
+  let doc;
+  try {
+    doc = new DOMParser().parseFromString(xml, "text/xml");
+  } catch (e) {
+    return { valid: false, reason: "XML parse error: " + e.message };
+  }
+
+  // Locate all <Signature> elements (may appear on the Response or Assertion)
+  const sigNodes = doc.getElementsByTagNameNS(
+    "http://www.w3.org/2000/09/xmldsig#",
+    "Signature"
+  );
+
+  if (!sigNodes || sigNodes.length === 0) {
+    return {
+      valid: false,
+      reason: "No XML-DSig <Signature> element found in SAMLResponse.",
+    };
+  }
+
+  const pem = toPem(cert);
+
+  // Verify each signature node against the IdP public certificate
+  for (let i = 0; i < sigNodes.length; i++) {
+    const sig = new SignedXml({ publicCert: pem });
+
+    try {
+      sig.loadSignature(sigNodes[i]);
+      const ok = sig.checkSignature(xml);
+      if (!ok) {
+        return {
+          valid: false,
+          reason:
+            "Signature verification failed: " +
+            (sig.validationErrors || []).join("; "),
+        };
+      }
+    } catch (e) {
+      return { valid: false, reason: "Signature check threw: " + e.message };
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
  * Process the SAML response posted back by the IdP (HTTP-POST binding).
  *
  * Behaviour:
  *   • 400  – No SAMLResponse field present in the request body.
- *   • 401  – SAMLResponse is present but fails validation (invalid Base64,
- *             missing XML structure, or signature verification failure).
- *             In this stub the "verification" is intentionally minimal: we
- *             check that the value decodes to something that looks like a
- *             SAML XML document. A real implementation will use a SAML
- *             library to fully verify the IdP signature.
- *   • 200  – (future) Assertion verified; session/JWT issued.
+ *   • 401  – SAMLResponse present but fails validation:
+ *             - not valid Base64
+ *             - not a SAML 2.0 Response XML document
+ *             - IdP certificate not configured (cannot verify)
+ *             - XML-DSig signature missing or cryptographically invalid
+ *   • 200  – Signature verified (full session issuance deferred to next task).
  *
  * Security note: the raw SAMLResponse value is never echoed back in error
  * responses because it may contain sensitive attribute claims.
@@ -89,7 +155,7 @@ router.post("/callback", (req, res) => {
     });
   }
 
-  // Attempt to Base64-decode and do a minimal structural check.
+  // Decode Base64 → XML string
   let decoded;
   try {
     decoded = Buffer.from(rawResponse, "base64").toString("utf8");
@@ -100,8 +166,7 @@ router.post("/callback", (req, res) => {
     });
   }
 
-  // A valid SAML response must be an XML document containing a Response element
-  // in the SAML protocol namespace. Reject anything that doesn't look like one.
+  // Must look like a SAML 2.0 Response document
   const looksLikeSaml =
     decoded.includes("samlp:Response") ||
     decoded.includes("urn:oasis:names:tc:SAML:2.0:protocol");
@@ -114,13 +179,32 @@ router.post("/callback", (req, res) => {
     });
   }
 
-  // TODO (next task): fully verify the IdP signature using samlConfig.idp.certificate,
-  // parse the assertion, look up / provision the user, and issue a session or JWT.
+  // Require a configured IdP certificate — without it we cannot verify the
+  // signature and must refuse to accept the assertion.
+  const cert = samlConfig.idp.certificate;
+  if (!cert) {
+    return res.status(401).json({
+      status: "error",
+      message:
+        "Cannot verify SAMLResponse: IdP certificate (SAML_IDP_CERTIFICATE) is not configured.",
+    });
+  }
+
+  // Perform full XML-DSig signature verification
+  const result = verifySamlSignature(decoded, cert);
+  if (!result.valid) {
+    return res.status(401).json({
+      status: "error",
+      message: "SAMLResponse signature verification failed.",
+      reason: result.reason,
+    });
+  }
+
+  // TODO (next task): parse the verified assertion, look up / provision the
+  // user account, and issue a session cookie or JWT.
   return res.status(200).json({
-    status: "stub",
-    message:
-      "SAMLResponse received and passed basic structural validation. " +
-      "Full signature verification will be implemented in the next task.",
+    status: "ok",
+    message: "SAMLResponse signature verified successfully.",
   });
 });
 
