@@ -1,7 +1,8 @@
 /**
- * SAML SSO Authentication Routes
+ * SAML SSO Authentication Routes — zero external SAML dependencies
  *
- * Provides three endpoints for SAML 2.0 Single Sign-On:
+ * Provides three endpoints for SAML 2.0 Single Sign-On using only
+ * Node.js built-in modules (crypto, zlib).
  *
  *   GET  /api/auth/saml/login    — Redirects the user to the IdP login page
  *   POST /api/auth/saml/callback — Receives and validates the SAML response
@@ -14,42 +15,24 @@
 
 const express = require("express");
 const {
-  createIdentityProvider,
-  createServiceProvider,
+  createLoginRequestUrl,
+  generateSpMetadata,
   validateXmlSignature,
-  getIdpCertificate,
+  extractSamlAttributes,
 } = require("./samlConfig");
 
 const router = express.Router();
 
-// Lazily initialised SP and IdP instances (created on first request)
-let sp = null;
-let idp = null;
-
-function ensureProviders() {
-  if (!sp) {
-    sp = createServiceProvider();
-  }
-  if (!idp) {
-    idp = createIdentityProvider();
-  }
-}
-
 // ---------------------------------------------------------------------------
 // GET /api/auth/saml/login
 //
-// Generates a SAML AuthnRequest and redirects the user to the IdP's
-// Single Sign-On URL with the encoded request as a query parameter.
+// Generates a SAML AuthnRequest, deflates and base64-encodes it, then
+// redirects the user to the IdP's SSO URL with the SAMLRequest parameter.
 // ---------------------------------------------------------------------------
 router.get("/login", async (req, res) => {
   try {
-    ensureProviders();
-
-    // createLoginRequest produces { id, context } where context is the
-    // full redirect URL including the SAMLRequest query parameter.
-    const { context } = sp.createLoginRequest(idp, "redirect");
-
-    return res.redirect(context);
+    const redirectUrl = await createLoginRequestUrl();
+    return res.redirect(redirectUrl);
   } catch (err) {
     console.error("[SAML] Login redirect failed:", err.message);
     return res.status(500).json({
@@ -70,9 +53,7 @@ router.get("/login", async (req, res) => {
 // ---------------------------------------------------------------------------
 router.post("/callback", express.urlencoded({ extended: false }), async (req, res) => {
   try {
-    ensureProviders();
-
-    const samlResponse = req.body.SAMLResponse;
+    const samlResponse = req.body && req.body.SAMLResponse;
 
     if (!samlResponse) {
       return res.status(400).json({
@@ -92,63 +73,27 @@ router.post("/callback", express.urlencoded({ extended: false }), async (req, re
       });
     }
 
-    // Validate that it looks like a SAML response
-    if (!xml.includes("samlp:Response") && !xml.includes("saml2p:Response") && !xml.includes(":Response")) {
+    // Validate that it contains SAML response structure
+    if (!xml.includes("Response")) {
       return res.status(401).json({
         error: "invalid_saml_response",
-        message: "The response is not a valid SAML response document.",
+        message: "The payload is not a valid SAML response document.",
       });
     }
-
-    // Check for the presence of a Signature element
-    const hasSignature = xml.includes("ds:Signature") || xml.includes("Signature");
-    const idpCert = getIdpCertificate();
 
     // Validate the XML digital signature
-    if (hasSignature) {
-      if (!idpCert) {
-        // No IdP certificate configured — cannot validate signatures
-        console.error("[SAML] No IdP certificate configured; cannot validate signature");
-        return res.status(401).json({
-          error: "signature_validation_failed",
-          message: "SAML response contains a signature but no IdP certificate is configured for validation.",
-        });
-      }
-
-      const sigResult = validateXmlSignature(xml, idpCert);
-      if (!sigResult.valid) {
-        console.error("[SAML] Signature validation failed:", sigResult.error);
-        return res.status(401).json({
-          error: "invalid_signature",
-          message: "SAML response signature validation failed.",
-          details: sigResult.error,
-        });
-      }
-    } else {
-      // No signature present — reject unsigned responses
+    const sigResult = validateXmlSignature(xml);
+    if (!sigResult.valid) {
+      console.error("[SAML] Signature validation failed:", sigResult.error);
       return res.status(401).json({
-        error: "missing_signature",
-        message: "SAML response does not contain a digital signature.",
+        error: "invalid_signature",
+        message: "SAML response signature validation failed.",
+        details: sigResult.error,
       });
     }
 
-    // Signature is valid — attempt to parse the response via samlify
-    let parseResult;
-    try {
-      parseResult = await sp.parseLoginResponse(idp, "post", { body: req.body });
-    } catch (parseErr) {
-      console.error("[SAML] Response parsing failed:", parseErr.message);
-      return res.status(401).json({
-        error: "saml_parse_failed",
-        message: "Failed to parse SAML response after signature validation.",
-        details: parseErr.message,
-      });
-    }
-
-    // Extract user attributes from the assertion
-    const extract = parseResult.extract || {};
-    const nameID = extract.nameID || null;
-    const attributes = extract.attributes || {};
+    // Signature is valid — extract user attributes
+    const { nameID, attributes } = extractSamlAttributes(xml);
 
     return res.json({
       status: "authenticated",
@@ -172,15 +117,10 @@ router.post("/callback", express.urlencoded({ extended: false }), async (req, re
 // GET /api/auth/saml/metadata
 //
 // Returns the Service Provider metadata XML document.
-// This is shared with the IdP administrator so they can configure the
-// trust relationship.
 // ---------------------------------------------------------------------------
 router.get("/metadata", (req, res) => {
   try {
-    ensureProviders();
-
-    const metadata = sp.getMetadata();
-
+    const metadata = generateSpMetadata();
     res.set("Content-Type", "application/xml");
     return res.send(metadata);
   } catch (err) {

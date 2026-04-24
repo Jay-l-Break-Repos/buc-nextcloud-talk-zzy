@@ -1,8 +1,8 @@
 /**
- * SAML SSO Configuration
+ * SAML SSO Configuration — zero external dependencies
  *
- * Configures the Service Provider (SP) and Identity Provider (IdP) settings
- * for SAML 2.0 authentication using the samlify library.
+ * Implements SAML 2.0 SP functionality using only Node.js built-in modules
+ * (crypto, zlib, querystring). No samlify or other SAML libraries required.
  *
  * Environment variables:
  *   SAML_IDP_SSO_URL        — IdP Single Sign-On URL (login endpoint)
@@ -10,89 +10,174 @@
  *   SAML_IDP_CERTIFICATE    — IdP X.509 certificate (PEM) for signature verification
  *   SAML_SP_ENTITY_ID       — SP entity ID (unique identifier for this application)
  *   SAML_SP_ACS_URL         — SP Assertion Consumer Service URL (callback endpoint)
- *   SAML_SP_PRIVATE_KEY     — SP private key (PEM) for signing requests (optional)
- *   SAML_SP_CERTIFICATE     — SP X.509 certificate (PEM) for metadata (optional)
  */
 
-const saml = require("samlify");
 const crypto = require("crypto");
+const zlib = require("zlib");
+
+// ---------------------------------------------------------------------------
+// Configuration helpers
+// ---------------------------------------------------------------------------
+
+function getConfig() {
+  return {
+    idpSsoUrl: process.env.SAML_IDP_SSO_URL || "https://idp.example.com/sso/saml",
+    idpEntityId: process.env.SAML_IDP_ENTITY_ID || process.env.SAML_IDP_SSO_URL || "https://idp.example.com/sso/saml",
+    idpCertificate: process.env.SAML_IDP_CERTIFICATE || "",
+    spEntityId: process.env.SAML_SP_ENTITY_ID || "https://nextcloud-talk.example.com/saml/metadata",
+    spAcsUrl: process.env.SAML_SP_ACS_URL || "http://localhost:9090/api/auth/saml/callback",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// AuthnRequest generation (for login redirect)
+// ---------------------------------------------------------------------------
 
 /**
- * XML digital signature validator.
+ * Generate a SAML 2.0 AuthnRequest XML and return the IdP redirect URL.
  *
- * samlify delegates schema/signature validation to a user-supplied validator.
- * We perform real XML signature verification using the IdP certificate.
+ * The AuthnRequest is deflated, base64-encoded, and URL-encoded as the
+ * SAMLRequest query parameter on the IdP's SSO URL.
+ *
+ * @returns {Promise<string>} The full redirect URL
  */
-saml.setSchemaValidator({
-  validate: (xmlString) => {
-    // Basic structural validation — ensure it looks like a SAML response
-    if (!xmlString || typeof xmlString !== "string") {
-      return Promise.reject(new Error("Empty or invalid SAML response"));
-    }
-    if (!xmlString.includes("samlp:Response") && !xmlString.includes("saml2p:Response")) {
-      return Promise.reject(new Error("Not a valid SAML response document"));
-    }
-    // Signature validation is performed separately in validateXmlSignature()
-    return Promise.resolve("validated");
-  },
-});
+function createLoginRequestUrl() {
+  const config = getConfig();
+  const id = "_" + crypto.randomBytes(16).toString("hex");
+  const issueInstant = new Date().toISOString();
+
+  const authnRequest = [
+    '<samlp:AuthnRequest',
+    '  xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"',
+    '  xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"',
+    `  ID="${id}"`,
+    '  Version="2.0"',
+    `  IssueInstant="${issueInstant}"`,
+    `  AssertionConsumerServiceURL="${config.spAcsUrl}"`,
+    '  ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"',
+    `  Destination="${config.idpSsoUrl}">`,
+    `  <saml:Issuer>${config.spEntityId}</saml:Issuer>`,
+    '  <samlp:NameIDPolicy',
+    '    Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"',
+    '    AllowCreate="true"/>',
+    '</samlp:AuthnRequest>',
+  ].join("\n");
+
+  return new Promise((resolve, reject) => {
+    zlib.deflateRaw(authnRequest, (err, deflated) => {
+      if (err) return reject(err);
+      const encoded = deflated.toString("base64");
+      const separator = config.idpSsoUrl.includes("?") ? "&" : "?";
+      const url = `${config.idpSsoUrl}${separator}SAMLRequest=${encodeURIComponent(encoded)}`;
+      resolve(url);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// SP Metadata generation
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate the SP metadata XML document.
+ *
+ * @returns {string} XML metadata
+ */
+function generateSpMetadata() {
+  const config = getConfig();
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<md:EntityDescriptor',
+    '  xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"',
+    `  entityID="${config.spEntityId}">`,
+    '  <md:SPSSODescriptor',
+    '    AuthnRequestsSigned="false"',
+    '    WantAssertionsSigned="true"',
+    '    protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">',
+    '    <md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat>',
+    '    <md:AssertionConsumerService',
+    '      Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"',
+    `      Location="${config.spAcsUrl}"`,
+    '      index="0"',
+    '      isDefault="true"/>',
+    '  </md:SPSSODescriptor>',
+    '</md:EntityDescriptor>',
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// XML Signature Validation
+// ---------------------------------------------------------------------------
 
 /**
  * Validate the XML digital signature in a SAML response.
  *
- * Extracts the <ds:SignatureValue> and <ds:SignedInfo> from the XML,
- * then verifies the signature against the IdP's X.509 certificate.
- *
  * @param {string} xml - The decoded SAML response XML
- * @param {string} idpCert - The IdP's X.509 certificate in PEM format
  * @returns {{ valid: boolean, error?: string }}
  */
-function validateXmlSignature(xml, idpCert) {
+function validateXmlSignature(xml) {
+  const config = getConfig();
+
   try {
-    // Extract SignatureValue
-    const sigValueMatch = xml.match(
-      /<ds:SignatureValue[^>]*>([\s\S]*?)<\/ds:SignatureValue>/
-    );
-    if (!sigValueMatch) {
-      return { valid: false, error: "No SignatureValue found in SAML response" };
+    // Must have a Signature element
+    const hasSignature = xml.includes("<ds:Signature") || xml.includes("<Signature");
+    if (!hasSignature) {
+      return { valid: false, error: "No XML signature found in SAML response" };
     }
 
-    // Extract the SignedInfo block (the data that was signed)
+    // Extract SignatureValue
+    const sigValueMatch = xml.match(
+      /<(?:ds:)?SignatureValue[^>]*>([\s\S]*?)<\/(?:ds:)?SignatureValue>/
+    );
+    if (!sigValueMatch) {
+      return { valid: false, error: "No SignatureValue element found" };
+    }
+
+    // Extract SignedInfo block
     const signedInfoMatch = xml.match(
-      /<ds:SignedInfo[^>]*>([\s\S]*?)<\/ds:SignedInfo>/
+      /(<(?:ds:)?SignedInfo[\s\S]*?<\/(?:ds:)?SignedInfo>)/
     );
     if (!signedInfoMatch) {
-      return { valid: false, error: "No SignedInfo found in SAML response" };
+      return { valid: false, error: "No SignedInfo element found" };
+    }
+
+    // If no IdP certificate is configured, we cannot verify
+    if (!config.idpCertificate) {
+      return { valid: false, error: "No IdP certificate configured for signature verification" };
     }
 
     const signatureValue = sigValueMatch[1].replace(/\s+/g, "");
-    const signedInfoXml = `<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${signedInfoMatch[1]}</ds:SignedInfo>`;
+    const signedInfoXml = signedInfoMatch[1];
 
-    // Determine the signature algorithm from SignatureMethod
-    const sigMethodMatch = signedInfoXml.match(
-      /Algorithm="([^"]+)"/
-    );
-    let algorithm = "RSA-SHA256"; // default
+    // Ensure the SignedInfo has the xmldsig namespace for canonical form
+    let canonicalSignedInfo = signedInfoXml;
+    if (!canonicalSignedInfo.includes("xmlns:ds=") && !canonicalSignedInfo.includes("xmlns=")) {
+      canonicalSignedInfo = canonicalSignedInfo.replace(
+        /(<(?:ds:)?SignedInfo)/,
+        '$1 xmlns:ds="http://www.w3.org/2000/09/xmldsig#"'
+      );
+    }
+
+    // Determine signature algorithm
+    const sigMethodMatch = canonicalSignedInfo.match(/Algorithm="([^"]+)"/);
+    let algorithm = "RSA-SHA256";
     if (sigMethodMatch) {
       const algoUri = sigMethodMatch[1].toLowerCase();
-      if (algoUri.includes("sha1")) {
-        algorithm = "RSA-SHA1";
-      } else if (algoUri.includes("sha512")) {
-        algorithm = "RSA-SHA512";
-      } else if (algoUri.includes("sha256")) {
-        algorithm = "RSA-SHA256";
-      }
+      if (algoUri.includes("sha1")) algorithm = "RSA-SHA1";
+      else if (algoUri.includes("sha512")) algorithm = "RSA-SHA512";
+      else if (algoUri.includes("sha256")) algorithm = "RSA-SHA256";
     }
 
-    // Normalise the certificate into PEM format if needed
-    let pemCert = idpCert.trim();
+    // Normalise certificate to PEM
+    let pemCert = config.idpCertificate.trim();
     if (!pemCert.startsWith("-----BEGIN")) {
-      pemCert = `-----BEGIN CERTIFICATE-----\n${pemCert}\n-----END CERTIFICATE-----`;
+      pemCert = "-----BEGIN CERTIFICATE-----\n" + pemCert + "\n-----END CERTIFICATE-----";
     }
 
-    // Verify the signature
+    // Verify
     const verifier = crypto.createVerify(algorithm);
-    verifier.update(signedInfoXml);
+    verifier.update(canonicalSignedInfo);
     const isValid = verifier.verify(pemCert, signatureValue, "base64");
 
     if (!isValid) {
@@ -101,76 +186,44 @@ function validateXmlSignature(xml, idpCert) {
 
     return { valid: true };
   } catch (err) {
-    return { valid: false, error: `Signature validation error: ${err.message}` };
+    return { valid: false, error: "Signature validation error: " + err.message };
   }
 }
 
-/**
- * Build the Identity Provider configuration from environment variables.
- */
-function createIdentityProvider() {
-  const ssoLoginUrl = process.env.SAML_IDP_SSO_URL || "https://idp.example.com/sso/saml";
-  const idpCertificate = process.env.SAML_IDP_CERTIFICATE || "";
-
-  const idpConfig = {
-    entityID: process.env.SAML_IDP_ENTITY_ID || ssoLoginUrl,
-    singleSignOnService: [
-      {
-        Binding: "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
-        Location: ssoLoginUrl,
-      },
-    ],
-  };
-
-  if (idpCertificate) {
-    idpConfig.signingCert = idpCertificate;
-  }
-
-  return saml.IdentityProvider(idpConfig);
-}
+// ---------------------------------------------------------------------------
+// SAML Response Parsing
+// ---------------------------------------------------------------------------
 
 /**
- * Build the Service Provider configuration from environment variables.
+ * Extract basic attributes from a decoded SAML response XML.
+ *
+ * @param {string} xml - The decoded SAML response XML
+ * @returns {{ nameID: string|null, attributes: object }}
  */
-function createServiceProvider() {
-  const entityId = process.env.SAML_SP_ENTITY_ID || "https://nextcloud-talk.example.com/saml/metadata";
-  const acsUrl = process.env.SAML_SP_ACS_URL || "http://localhost:9090/api/auth/saml/callback";
-  const spPrivateKey = process.env.SAML_SP_PRIVATE_KEY || "";
-  const spCertificate = process.env.SAML_SP_CERTIFICATE || "";
+function extractSamlAttributes(xml) {
+  let nameID = null;
+  const attributes = {};
 
-  const spConfig = {
-    entityID: entityId,
-    assertionConsumerService: [
-      {
-        Binding: "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
-        Location: acsUrl,
-      },
-    ],
-    nameIDFormat: ["urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"],
-    authnRequestsSigned: false,
-    wantAssertionsSigned: false,
-  };
-
-  if (spPrivateKey) {
-    spConfig.privateKey = spPrivateKey;
-  }
-  if (spCertificate) {
-    spConfig.signingCert = spCertificate;
+  // Extract NameID
+  const nameIdMatch = xml.match(/<(?:saml2?:)?NameID[^>]*>([\s\S]*?)<\/(?:saml2?:)?NameID>/);
+  if (nameIdMatch) {
+    nameID = nameIdMatch[1].trim();
   }
 
-  return saml.ServiceProvider(spConfig);
-}
+  // Extract Attribute elements
+  const attrRegex = /<(?:saml2?:)?Attribute\s+Name="([^"]+)"[^>]*>[\s\S]*?<(?:saml2?:)?AttributeValue[^>]*>([\s\S]*?)<\/(?:saml2?:)?AttributeValue>[\s\S]*?<\/(?:saml2?:)?Attribute>/g;
+  let match;
+  while ((match = attrRegex.exec(xml)) !== null) {
+    attributes[match[1]] = match[2].trim();
+  }
 
-/**
- * Return the raw IdP certificate string for use in signature validation.
- */
-function getIdpCertificate() {
-  return process.env.SAML_IDP_CERTIFICATE || "";
+  return { nameID, attributes };
 }
 
 module.exports = {
-  createIdentityProvider,
-  createServiceProvider,
+  getConfig,
+  createLoginRequestUrl,
+  generateSpMetadata,
   validateXmlSignature,
-  getIdpCertificate,
+  extractSamlAttributes,
 };
