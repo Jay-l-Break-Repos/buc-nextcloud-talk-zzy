@@ -4,15 +4,21 @@
  * Provides three endpoints for SAML 2.0 Single Sign-On:
  *
  *   GET  /api/auth/saml/login    — Redirects the user to the IdP login page
- *   POST /api/auth/saml/callback — Receives and processes the SAML response (placeholder)
+ *   POST /api/auth/saml/callback — Receives and validates the SAML response
  *   GET  /api/auth/saml/metadata — Returns the SP metadata XML
  *
- * Phase 1: Basic route structure and redirect flow.
- * Full signature validation and user attribute extraction will be added in follow-up phases.
+ * The callback endpoint performs XML digital signature validation against
+ * the configured IdP certificate. Invalid or tampered responses are
+ * rejected with HTTP 401 Unauthorized.
  */
 
 const express = require("express");
-const { createIdentityProvider, createServiceProvider } = require("./samlConfig");
+const {
+  createIdentityProvider,
+  createServiceProvider,
+  validateXmlSignature,
+  getIdpCertificate,
+} = require("./samlConfig");
 
 const router = express.Router();
 
@@ -59,9 +65,8 @@ router.get("/login", async (req, res) => {
 // Assertion Consumer Service (ACS) endpoint.
 // The IdP posts the SAML response here after the user authenticates.
 //
-// Phase 1 — placeholder: acknowledges receipt of the SAML response.
-// Full response parsing, signature validation, and user attribute extraction
-// will be implemented in a follow-up step.
+// Validates the XML digital signature in the SAML response against the
+// configured IdP certificate. Returns 401 if validation fails.
 // ---------------------------------------------------------------------------
 router.post("/callback", express.urlencoded({ extended: false }), async (req, res) => {
   try {
@@ -76,22 +81,86 @@ router.post("/callback", express.urlencoded({ extended: false }), async (req, re
       });
     }
 
-    // Phase 1: Attempt basic parsing via samlify (schema validation is
-    // currently set to permissive/skip mode in samlConfig.js).
-    // Full validation will be enabled in a follow-up phase.
-    const parseResult = await sp.parseLoginResponse(idp, "post", { body: req.body });
+    // Decode the base64-encoded SAML response
+    let xml;
+    try {
+      xml = Buffer.from(samlResponse, "base64").toString("utf-8");
+    } catch (decodeErr) {
+      return res.status(400).json({
+        error: "invalid_encoding",
+        message: "SAMLResponse is not valid base64.",
+      });
+    }
 
-    // TODO (Phase 2): Validate signature, extract user attributes,
-    //                  create/update local user session, issue JWT, etc.
+    // Validate that it looks like a SAML response
+    if (!xml.includes("samlp:Response") && !xml.includes("saml2p:Response") && !xml.includes(":Response")) {
+      return res.status(401).json({
+        error: "invalid_saml_response",
+        message: "The response is not a valid SAML response document.",
+      });
+    }
+
+    // Check for the presence of a Signature element
+    const hasSignature = xml.includes("ds:Signature") || xml.includes("Signature");
+    const idpCert = getIdpCertificate();
+
+    // Validate the XML digital signature
+    if (hasSignature) {
+      if (!idpCert) {
+        // No IdP certificate configured — cannot validate signatures
+        console.error("[SAML] No IdP certificate configured; cannot validate signature");
+        return res.status(401).json({
+          error: "signature_validation_failed",
+          message: "SAML response contains a signature but no IdP certificate is configured for validation.",
+        });
+      }
+
+      const sigResult = validateXmlSignature(xml, idpCert);
+      if (!sigResult.valid) {
+        console.error("[SAML] Signature validation failed:", sigResult.error);
+        return res.status(401).json({
+          error: "invalid_signature",
+          message: "SAML response signature validation failed.",
+          details: sigResult.error,
+        });
+      }
+    } else {
+      // No signature present — reject unsigned responses
+      return res.status(401).json({
+        error: "missing_signature",
+        message: "SAML response does not contain a digital signature.",
+      });
+    }
+
+    // Signature is valid — attempt to parse the response via samlify
+    let parseResult;
+    try {
+      parseResult = await sp.parseLoginResponse(idp, "post", { body: req.body });
+    } catch (parseErr) {
+      console.error("[SAML] Response parsing failed:", parseErr.message);
+      return res.status(401).json({
+        error: "saml_parse_failed",
+        message: "Failed to parse SAML response after signature validation.",
+        details: parseErr.message,
+      });
+    }
+
+    // Extract user attributes from the assertion
+    const extract = parseResult.extract || {};
+    const nameID = extract.nameID || null;
+    const attributes = extract.attributes || {};
 
     return res.json({
-      status: "callback_received",
-      message: "SAML response received and parsed. Full processing will be implemented in Phase 2.",
-      extract: parseResult.extract || null,
+      status: "authenticated",
+      message: "SAML response validated and parsed successfully.",
+      user: {
+        nameID,
+        attributes,
+      },
     });
   } catch (err) {
     console.error("[SAML] Callback processing failed:", err.message);
-    return res.status(500).json({
+    return res.status(401).json({
       error: "saml_callback_failed",
       message: "Failed to process SAML response.",
       details: err.message,
