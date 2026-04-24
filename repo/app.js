@@ -26,7 +26,7 @@ const IDP_CERT     = process.env.SAML_IDP_CERTIFICATE || "";
 
 // GET /api/auth/saml/login — redirect to IdP
 app.get("/api/auth/saml/login", (req, res) => {
-  return res.redirect(IDP_SSO_URL);
+  return res.status(302).redirect(IDP_SSO_URL);
 });
 
 // POST /api/auth/saml/callback — validate SAML response
