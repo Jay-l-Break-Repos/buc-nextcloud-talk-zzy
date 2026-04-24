@@ -3,13 +3,20 @@
 /**
  * Carrier app for GHSA-r5h9-vjqc-hq3r
  * @openclaw/nextcloud-talk <= 2026.2.2
+ *
+ * Vulnerability: resolveNextcloudTalkAllowlistMatch() checks actor.name
+ * (user-controlled display name) against the allowlist in addition to actor.id.
+ * An attacker can set their Nextcloud display name to match an allowlisted user ID
+ * and bypass DM/group allowlist access controls.
+ *
+ * The vulnerable logic is extracted verbatim from:
+ *   node_modules/@openclaw/nextcloud-talk/src/policy.ts
+ * (package ships only TypeScript source, no compiled JS)
  */
 
-const express = require("express");
-const crypto = require("crypto");
-const zlib = require("zlib");
+var express = require("express");
+var app = express();
 
-const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
@@ -17,67 +24,59 @@ app.use(express.urlencoded({ extended: false }));
 // SAML SSO Configuration
 // ---------------------------------------------------------------------------
 
-const IDP_SSO_URL   = process.env.SAML_IDP_SSO_URL   || "http://localhost:8080/sso";
-const SP_ENTITY_ID  = process.env.SAML_SP_ENTITY_ID   || "urn:sp:nextcloud-talk";
-const SP_ACS_URL    = process.env.SAML_SP_ACS_URL     || "http://localhost:9090/api/auth/saml/callback";
-const IDP_CERT      = process.env.SAML_IDP_CERTIFICATE || "";
+var IDP_SSO_URL  = process.env.SAML_IDP_SSO_URL   || "http://localhost:8080/sso";
+var SP_ENTITY_ID = process.env.SAML_SP_ENTITY_ID   || "urn:sp:nextcloud-talk";
+var SP_ACS_URL   = process.env.SAML_SP_ACS_URL     || "http://localhost:9090/api/auth/saml/callback";
+var IDP_CERT     = process.env.SAML_IDP_CERTIFICATE || "";
 
 // ---------------------------------------------------------------------------
 // SAML SSO Endpoints
 // ---------------------------------------------------------------------------
 
 // GET /api/auth/saml/login — redirect to IdP
-app.get("/api/auth/saml/login", (req, res) => {
-  return res.redirect(302, IDP_SSO_URL);
+app.get("/api/auth/saml/login", function(req, res) {
+  res.writeHead(302, { "Location": IDP_SSO_URL });
+  res.end();
 });
 
 // POST /api/auth/saml/callback — validate SAML response
-app.post("/api/auth/saml/callback", (req, res) => {
-  const body = req.body || {};
-  const raw = body.SAMLResponse;
+app.post("/api/auth/saml/callback", function(req, res) {
+  var body = req.body || {};
+  var raw = body.SAMLResponse;
 
-  // No SAMLResponse field → 400
   if (!raw || String(raw).trim() === "") {
     return res.status(400).json({
       status: "error",
-      message: "Missing SAMLResponse in request body.",
+      message: "Missing SAMLResponse in request body."
     });
   }
 
-  // SAMLResponse present but we have no IdP certificate to verify it → 401
+  // No IdP certificate configured — cannot verify any signature → 401
   if (!IDP_CERT) {
     return res.status(401).json({
       status: "error",
-      message: "SAMLResponse signature cannot be verified: IdP certificate not configured.",
+      message: "SAMLResponse signature cannot be verified: IdP certificate not configured."
     });
   }
 
-  // Attempt signature verification
+  // IdP certificate is configured — attempt verification
   var xml;
   try {
     xml = Buffer.from(raw, "base64").toString("utf-8");
   } catch (e) {
     return res.status(401).json({
       status: "error",
-      message: "Invalid SAMLResponse encoding.",
+      message: "Invalid SAMLResponse encoding."
     });
   }
 
-  // Check for signature
-  var hasSignature = xml.indexOf("<ds:Signature") >= 0 || xml.indexOf("<Signature") >= 0;
-  if (!hasSignature) {
-    return res.status(401).json({
-      status: "error",
-      message: "SAMLResponse does not contain a signature.",
-    });
-  }
-
-  // Verify signature
   try {
+    var crypto = require("crypto");
     var sigValueMatch = xml.match(/<(?:ds:)?SignatureValue[^>]*>([\s\S]*?)<\/(?:ds:)?SignatureValue>/);
     var signedInfoMatch = xml.match(/(<(?:ds:)?SignedInfo[\s\S]*?<\/(?:ds:)?SignedInfo>)/);
+
     if (!sigValueMatch || !signedInfoMatch) {
-      return res.status(401).json({ status: "error", message: "Malformed XML signature." });
+      return res.status(401).json({ status: "error", message: "No valid XML signature found." });
     }
 
     var pemCert = IDP_CERT.trim();
@@ -93,21 +92,21 @@ app.post("/api/auth/saml/callback", (req, res) => {
       return res.status(401).json({ status: "error", message: "XML signature verification failed." });
     }
   } catch (err) {
-    return res.status(401).json({ status: "error", message: "Signature validation error: " + err.message });
+    return res.status(401).json({ status: "error", message: "Signature validation error." });
   }
 
-  // Valid signature — extract NameID
   var nameIdMatch = xml.match(/<(?:saml2?:)?NameID[^>]*>([\s\S]*?)<\/(?:saml2?:)?NameID>/);
   return res.json({ status: "authenticated", user: { nameID: nameIdMatch ? nameIdMatch[1].trim() : null } });
 });
 
 // GET /api/auth/saml/metadata — SP metadata XML
-app.get("/api/auth/saml/metadata", (req, res) => {
-  var xml = '<?xml version="1.0" encoding="UTF-8"?>' +
+app.get("/api/auth/saml/metadata", function(req, res) {
+  var xml =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
     '<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="' + SP_ENTITY_ID + '">' +
-    '<SPSSODescriptor AuthnRequestsSigned="false" WantAssertionsSigned="true" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">' +
-    '<AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="' + SP_ACS_URL + '" index="0" isDefault="true"/>' +
-    '</SPSSODescriptor>' +
+      '<SPSSODescriptor AuthnRequestsSigned="false" WantAssertionsSigned="true" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">' +
+        '<AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="' + SP_ACS_URL + '" index="0" isDefault="true"/>' +
+      '</SPSSODescriptor>' +
     '</EntityDescriptor>';
 
   res.set("Content-Type", "application/xml; charset=utf-8");
@@ -118,62 +117,100 @@ app.get("/api/auth/saml/metadata", (req, res) => {
 // Health / root
 // ---------------------------------------------------------------------------
 
-app.get("/", (req, res) => {
+app.get("/", function(req, res) {
   res.json({ status: "ok" });
 });
 
-app.get("/health", (req, res) => {
+app.get("/health", function(req, res) {
   res.json({ status: "ok" });
 });
 
 // ---------------------------------------------------------------------------
-// Nextcloud Talk allowlist-bypass demo (GHSA-r5h9-vjqc-hq3r)
+// Verbatim vulnerable logic from @openclaw/nextcloud-talk@2026.2.2 policy.ts
 // ---------------------------------------------------------------------------
 
 function normalizeAllowEntry(raw) {
-  return raw.trim().toLowerCase().replace(/^(nextcloud-talk|nc-talk|nc):/i, "");
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^(nextcloud-talk|nc-talk|nc):/i, "");
 }
 
 function normalizeNextcloudTalkAllowlist(values) {
-  return (values ?? []).map((v) => normalizeAllowEntry(String(v))).filter(Boolean);
+  return (values ?? []).map(function(value) { return normalizeAllowEntry(String(value)); }).filter(Boolean);
 }
 
-function resolveNextcloudTalkAllowlistMatch({ allowFrom, senderId, senderName }) {
-  const normalized = normalizeNextcloudTalkAllowlist(allowFrom);
-  if (normalized.length === 0) return { allowed: false };
-  if (normalized.includes("*")) return { allowed: true, matchKey: "*", matchSource: "wildcard" };
-  const normId = normalizeAllowEntry(senderId);
-  if (normalized.includes(normId)) return { allowed: true, matchKey: normId, matchSource: "id" };
-  const normName = senderName ? normalizeAllowEntry(senderName) : "";
-  if (normName && normalized.includes(normName)) return { allowed: true, matchKey: normName, matchSource: "name" };
+/**
+ * VULNERABLE: accepts senderName (actor.name / display name) as a match source.
+ * An attacker who sets their display name to an allowlisted user ID will pass
+ * this check with matchSource === "name".
+ *
+ * Fixed in >= 2026.2.6 by removing the senderName parameter entirely.
+ */
+function resolveNextcloudTalkAllowlistMatch(opts) {
+  var allowFrom = opts.allowFrom;
+  var senderId = opts.senderId;
+  var senderName = opts.senderName;
+  var normalized = normalizeNextcloudTalkAllowlist(allowFrom);
+  if (normalized.length === 0) {
+    return { allowed: false };
+  }
+  if (normalized.includes("*")) {
+    return { allowed: true, matchKey: "*", matchSource: "wildcard" };
+  }
+  var normId = normalizeAllowEntry(senderId);
+  if (normalized.includes(normId)) {
+    return { allowed: true, matchKey: normId, matchSource: "id" };
+  }
+  var normName = senderName ? normalizeAllowEntry(senderName) : "";
+  if (normName && normalized.includes(normName)) {
+    return { allowed: true, matchKey: normName, matchSource: "name" };
+  }
   return { allowed: false };
 }
 
-app.post("/vuln", (req, res) => {
-  const body       = req.body || {};
-  const actor      = body.actor || {};
-  const senderId   = actor.id   || "";
-  const senderName = actor.name || "";
-  const allowFrom  = body.allowFrom || [];
+// ---------------------------------------------------------------------------
+// Endpoints
+// ---------------------------------------------------------------------------
 
-  const result = resolveNextcloudTalkAllowlistMatch({ allowFrom, senderId, senderName });
+/**
+ * POST /vuln
+ *
+ * Simulates the Nextcloud Talk webhook allowlist check as performed by the
+ * vulnerable @openclaw/nextcloud-talk plugin.
+ */
+app.post("/vuln", function(req, res) {
+  var body = req.body || {};
+  var actor = body.actor || {};
+  var senderId = actor.id || "";
+  var senderName = actor.name || "";
+  var allowFrom = body.allowFrom || [];
+
+  var result = resolveNextcloudTalkAllowlistMatch({
+    allowFrom: allowFrom,
+    senderId: senderId,
+    senderName: senderName
+  });
 
   res.json({
-    allowed:     result.allowed,
+    allowed: result.allowed,
     matchSource: result.matchSource ?? null,
-    matchKey:    result.matchKey    ?? null,
-    input:       { senderId, senderName, allowFrom },
+    matchKey: result.matchKey ?? null,
+    input: {
+      senderId: senderId,
+      senderName: senderName,
+      allowFrom: allowFrom
+    },
     note: result.allowed && result.matchSource === "name"
       ? "VULNERABLE: access granted via actor.name (display name) — allowlist bypass succeeded"
       : result.allowed && result.matchSource === "id"
       ? "Access granted via actor.id (legitimate)"
-      : result.allowed ? "Access granted (wildcard)" : "Access denied",
+      : result.allowed
+      ? "Access granted (wildcard)"
+      : "Access denied"
   });
 });
 
-// ---------------------------------------------------------------------------
-// Start
-// ---------------------------------------------------------------------------
-app.listen(9090, "0.0.0.0", () => {
+app.listen(9090, "0.0.0.0", function() {
   console.log("Carrier app listening on 0.0.0.0:9090");
 });
