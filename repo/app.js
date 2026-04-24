@@ -16,9 +16,17 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
+// Parse URL-encoded bodies globally (needed for SAML POST binding)
+app.use(express.urlencoded({ extended: false }));
+
 // SAML SSO authentication routes
-const samlRoutes = require("./samlRoutes");
-app.use("/api/auth/saml", samlRoutes);
+try {
+  const samlRoutes = require("./samlRoutes");
+  app.use("/api/auth/saml", samlRoutes);
+  console.log("[SAML] Routes mounted at /api/auth/saml");
+} catch (err) {
+  console.error("[SAML] Failed to load SAML routes:", err.message);
+}
 
 // ---------------------------------------------------------------------------
 // Verbatim vulnerable logic from @openclaw/nextcloud-talk@2026.2.2 policy.ts

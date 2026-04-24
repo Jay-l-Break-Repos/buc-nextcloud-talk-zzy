@@ -51,7 +51,7 @@ router.get("/login", async (req, res) => {
 // Validates the XML digital signature in the SAML response against the
 // configured IdP certificate. Returns 401 if validation fails.
 // ---------------------------------------------------------------------------
-router.post("/callback", express.urlencoded({ extended: false }), async (req, res) => {
+router.post("/callback", async (req, res) => {
   try {
     const samlResponse = req.body && req.body.SAMLResponse;
 
