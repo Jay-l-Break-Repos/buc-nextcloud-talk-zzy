@@ -16,6 +16,10 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
+// SAML SSO authentication routes
+const samlRoutes = require("./samlRoutes");
+app.use("/api/auth/saml", samlRoutes);
+
 // ---------------------------------------------------------------------------
 // Verbatim vulnerable logic from @openclaw/nextcloud-talk@2026.2.2 policy.ts
 // ---------------------------------------------------------------------------
@@ -125,6 +129,9 @@ app.post("/vuln", (req, res) => {
 
 app.listen(9090, "0.0.0.0", () => {
   console.log("Carrier app listening on 0.0.0.0:9090");
-  console.log("  GET  /health  — liveness check");
-  console.log("  POST /vuln    — Nextcloud Talk allowlist bypass demo");
+  console.log("  GET  /health                  — liveness check");
+  console.log("  POST /vuln                    — Nextcloud Talk allowlist bypass demo");
+  console.log("  GET  /api/auth/saml/login     — SAML SSO login redirect");
+  console.log("  POST /api/auth/saml/callback  — SAML ACS callback (placeholder)");
+  console.log("  GET  /api/auth/saml/metadata  — SP metadata XML");
 });
